@@ -55,7 +55,7 @@ def _save_catalog(catalog, url):
     :param url: urlpath where to save the catalog root
     """
     url = url if not url.endswith("catalog.json") else os.path.split(url)[0]
-    catalog.normalize_and_save(url)
+    catalog.normalize_and_save(url, catalog_type=catalog.catalog_type)
 
 
 def download_assets(
