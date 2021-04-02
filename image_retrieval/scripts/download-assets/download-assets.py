@@ -76,8 +76,6 @@ def download_assets(
     """
     asset_keys = asset_keys or [None]
     for asset_key in asset_keys:
-        item = next(catalog.get_all_items())
-        item.assets[asset_key].href = "tmp"
         copy_asset(
             catalog,
             asset_key,
