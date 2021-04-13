@@ -18,7 +18,7 @@ The pre-processing involves the following steps:
     * A connectivity list containing the coordinates of the points on shadow profile that can be connected as shadow 
     casters/casted. This list can be stored as a plain text file.
     
-    These pieces of data ca be stored in a new STAC catalog, using the same 
+    These pieces of data can be stored in a new STAC catalog, using the same catalog structure as for the original data. 
    
 * Co-registration of the shadow-enhanced images. In the simplest approach this can be done by selecting a reference 
   image (highest sun angle, lowest cloud cover) and then by generate a global (X, Y)-shift that best matches each target 
