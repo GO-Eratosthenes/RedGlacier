@@ -171,8 +171,10 @@ def run_single_item(catalog, item_id, band_keys, metadata_key,
 
     # work in temporary directory
     with tempfile.TemporaryDirectory(dir="./") as tmpdir:
-        _generate_shadow_images(shadow_transform, assets, metadata, item,
-                                tmpdir)
+        work_path = os.path.abspath(tmpdir)
+        _generate_shadow_images(shadow_transform,
+                                [assets[k] for k in band_keys],
+                                metadata, item, work_path)
         for asset_key in item.assets.keys():
             # upload asset
             copy_asset(catalog, asset_key=asset_key, update_catalog=True,
