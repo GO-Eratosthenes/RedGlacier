@@ -125,7 +125,7 @@ def _generate_shadow_images(shadow_transform, bands, metadata, item, work_path):
     B, G, R, NIR = (b.squeeze().data for b in bands)
     shadow = enhance_shadow(shadow_transform, Blue=B, Green=G, Red=R,
                             Nir=NIR, RedEdge=None, Shw=None)
-    shadow_image_to_list(shadow, transform.to_gdal(), work_path,
+    shadow_image_to_list(shadow, transform.to_gdal(), f"{work_path}/",
                          {'bbox': None})
     (polygons, cast_conn) = create_shadow_polygons(shadow, work_path)
 
