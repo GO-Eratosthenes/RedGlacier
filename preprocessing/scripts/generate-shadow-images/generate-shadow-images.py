@@ -7,6 +7,8 @@ import numpy as np
 import pystac
 import stac2dcache
 
+from concurrent.futures import ProcessPoolExecutor, as_completed
+
 from stac2dcache.utils import get_asset, copy_asset
 
 from eratosthenes.preprocessing.handler_multispec import get_shadow_bands
@@ -180,7 +182,7 @@ def run_single_item(catalog, item_id, band_keys, metadata_key,
             copy_asset(catalog, asset_key=asset_key, update_catalog=True,
                        item_id=item_id, filesystem_to=filesystem,
                        max_workers=1)
-    return catalog.get_item(item_id, recursive=True)
+    return catalog.get_item(item_id, recursive=True).assets
 
 
 def main(config_filename):
@@ -204,17 +206,25 @@ def main(config_filename):
     # define required assets
     band_keys = [f"B{b:02}" for b in get_shadow_bands(collection_id)]
 
-    # loop over all items
-    for item in subcatalog.get_all_items():
-        _ = run_single_item(
-            subcatalog,
-            item_id=item.id,
-            band_keys=band_keys,
-            metadata_key="metadata",
-            shadow_transform=shadow_transform,
-            filesystem=dcache_fs
-        )
-        _save_catalog(catalog, catalog_url)
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+
+        future_to_items = {}
+        for item in subcatalog.get_all_items():
+            future = executor.submit(
+                run_single_item,
+                catalog=subcatalog,
+                item_id=item.id,
+                band_keys=band_keys,
+                metadata_key="metadata",
+                shadow_transform=shadow_transform,
+                filesystem=dcache_fs
+            )
+            future_to_items[future] = item
+
+        for future in as_completed(future_to_items):
+            item = future_to_items[future]
+            item.assets = future.result()
+            _save_catalog(catalog, catalog_url)
 
 
 if __name__ == "__main__":
