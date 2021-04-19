@@ -147,7 +147,7 @@ def _generate_shadow_images(shadow_transform, bands, metadata, item, work_path):
 
 
 def run_single_item(catalog, item_id, band_keys, metadata_key,
-                    shadow_transform, filesystem):
+                    shadow_transform, macaroon_path):
     """
     Run the shadow-enhancement workflow on a single item of the catalog,
     include the output files as catalog assets and upload these to the storage.
@@ -157,10 +157,13 @@ def run_single_item(catalog, item_id, band_keys, metadata_key,
     :param band_keys: list of bands required for the shadow transform
     :param metadata_key: metadata asset key
     :param shadow_transform: type of shadow transform algorithm employed
-    :param filesystem: fsspec-like filesystem object to perform IO on the
-        storage
+    :param macaroon_path: path to dCache token
     :return: STAC item object with assets included
     """
+    # configure connection to dCache
+    dcache = stac2dcache.configure(filesystem="dcache",
+                                   token_filename=macaroon_path)
+
     # get item of the catalog where output will be saved
     item = catalog.get_item(item_id, recursive=True)
 
@@ -168,7 +171,7 @@ def run_single_item(catalog, item_id, band_keys, metadata_key,
     input_item = _get_linked_object(item, "computed_from")
     asset_keys = [*band_keys, metadata_key]
     assets = _get_assets(_get_linked_object(input_item, "parent"), asset_keys,
-                         item_id, filesystem)
+                         item_id, dcache)
     metadata = assets.pop(metadata_key)
 
     # work in temporary directory
@@ -180,7 +183,7 @@ def run_single_item(catalog, item_id, band_keys, metadata_key,
         for asset_key in item.assets.keys():
             # upload asset
             copy_asset(catalog, asset_key=asset_key, update_catalog=True,
-                       item_id=item_id, filesystem_to=filesystem,
+                       item_id=item_id, filesystem_to=dcache,
                        max_workers=1)
     return catalog.get_item(item_id, recursive=True).assets
 
@@ -196,8 +199,7 @@ def main(config_filename):
         _parse_config_file(config_filename)
 
     # configure connection to dCache
-    dcache_fs = stac2dcache.configure(filesystem="dcache",
-                                      token_filename=macaroon_path)
+    stac2dcache.configure(filesystem="dcache", token_filename=macaroon_path)
 
     catalog = _read_catalog(catalog_url)
     subcatalog = catalog.get_child(collection_id) \
@@ -217,7 +219,7 @@ def main(config_filename):
                 band_keys=band_keys,
                 metadata_key="metadata",
                 shadow_transform=shadow_transform,
-                filesystem=dcache_fs
+                macaroon_path=macaroon_path
             )
             future_to_items[future] = item
 
