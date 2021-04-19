@@ -206,7 +206,7 @@ def main(config_filename):
 
     # loop over all items
     for item in subcatalog.get_all_items():
-        item = run_single_item(
+        _ = run_single_item(
             subcatalog,
             item_id=item.id,
             band_keys=band_keys,
@@ -214,8 +214,7 @@ def main(config_filename):
             shadow_transform=shadow_transform,
             filesystem=dcache_fs
         )
-
-    # _save_catalog(catalog, catalog_url)
+        _save_catalog(catalog, catalog_url)
 
 
 if __name__ == "__main__":
