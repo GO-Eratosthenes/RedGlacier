@@ -13,7 +13,8 @@ from stac2dcache.utils import get_asset, copy_asset
 
 from eratosthenes.preprocessing.handler_multispec import get_shadow_bands
 from eratosthenes.preprocessing.shadow_transforms import enhance_shadow
-from eratosthenes.preprocessing.shadow_geometry import shadow_image_to_list, create_shadow_polygons
+from eratosthenes.preprocessing.shadow_geometry import shadow_image_to_list, \
+    create_shadow_polygons
 from eratosthenes.generic.mapping_io import makeGeoIm
 
 
@@ -37,12 +38,14 @@ def _parse_config_file(filename=None):
     collection_id = config.pop("collection_id", None)
     macaroon_path = config.pop("macaroon_path")
     shadow_transform = config.pop("shadow_transform")
+    bbox = config.pop("bbox", None)
+    bbox = [float(el) for el in bbox.split()] if bbox is not None else bbox
     max_workers = int(config.pop("max_workers", 1))
 
     assert len(config) == 0, ("Unknown keys: "
                               "{}".format([k for k in config.keys()]))
     return (catalog_url, collection_id, macaroon_path, shadow_transform,
-            max_workers)
+            bbox, max_workers)
 
 
 def _read_catalog(url):
@@ -101,54 +104,68 @@ def _get_linked_object(item, link_key):
     return link.target
 
 
-def _generate_shadow_images(shadow_transform, bands, metadata, item, work_path):
+def _get_bbox_indices(x, y, bbox):
+    """
+    Convert bbox values to array indices
+
+    :param x, y: arrays with the X, Y coordinates
+    :param bbox: minx, miny, maxx, maxy values
+    :return: bbox converted to array indices
+    """
+    minx, miny, maxx, maxy = bbox
+    xindices, = np.where((x >= minx) & (x <= maxx))
+    yindices, = np.where((y >= miny) & (y <= maxy))
+    return xindices[0], xindices[-1]+1, yindices[0], yindices[-1]+1
+
+
+def _generate_shadow_images(shadow_transform, metadata, work_path, crs,
+                            transform, blue=None, green=None, red=None,
+                            NIR=None, bbox=None, date_created=None):
     """
     Run the shadow transform algorithm to produce all output files, and add
     links to these as STAC asset objects
 
     :param shadow_transform: type of shadow transform algorithm employed
-    :param bands: arrays
     :param metadata: text of the metadata XML file
-    :param item: STAC object of the item corresponding to the
     :param work_path: working directory path
+    :param crs: coordinate reference system
+    :param transform: geo-transformation
+    :param blue, green, red, NIR: arrays with the corresponding bands
+    :param bbox: bounds of the area of interest (in scene indices)
+    :param date_created: datetime string for image metadata
+    :return dictionary of assets paths
     """
+    assets = {}
 
-    # extract geo-info from bands
-    crs = bands[0].spatial_ref.crs_wkt
-    transform = bands[0].rio.transform()
-
-    # write out metadata
+    # write out metadata file, needed by eratosthenes functions
     with open(f"{work_path}/MTD_TL.xml", 'w') as f:
         f.write(metadata)
 
     # calculate shadow-enhanced images and other assets
-    B, G, R, NIR = (b.squeeze().data for b in bands)
-    shadow = enhance_shadow(shadow_transform, Blue=B, Green=G, Red=R,
+    shadow = enhance_shadow(shadow_transform, Blue=blue, Green=green, Red=red,
                             Nir=NIR, RedEdge=None, Shw=None)
     shadow_image_to_list(shadow, transform.to_gdal(), f"{work_path}/",
-                         {'bbox': None})
-#    (polygons, cast_conn) = create_shadow_polygons(shadow, work_path)
+                         {'bbox': bbox})
 
-    # save raster output and add assets to item
+#    (polygons, cast_conn) = create_shadow_polygons(shadow, work_path, bbox)
+
+    # add connectivity txt file to the asset dictionary
+    assets["connectivity"] = f"{work_path}/conn.txt"
+
+    # save raster output
 #    outputs = {'shadow': shadow, 'polygons': polygons, 'cast_conn': cast_conn}
     outputs = {'shadow': shadow}
-    datetime = item.datetime.strftime("%Y:%m:%d %H:%M:%S")
-    properties = {'shadow_transform': shadow_transform}
     for key, val in outputs.items():
-        path = f"{work_path}/{item.id}_{key}.tif"
+        path = f"{work_path}/{key}.tif"
         no_dat = np.nan if val.dtype.kind == 'f' else -9999
         makeGeoIm(val, transform.to_gdal(), crs, path, no_dat=no_dat,
-                  meta_descr=shadow_transform, date_created=datetime)
-        asset = pystac.Asset(href=path, properties=properties)
-        item.add_asset(key, asset)
-
-    # also add connectivity txt file
-    asset = pystac.Asset(href=f"{work_path}/conn.txt", properties=properties)
-    item.add_asset("connectivity", asset)
+                  meta_descr=shadow_transform, date_created=date_created)
+        assets[key] = path
+    return assets
 
 
 def run_single_item(catalog, item_id, band_keys, metadata_key,
-                    shadow_transform, macaroon_path):
+                    shadow_transform, bbox, macaroon_path):
     """
     Run the shadow-enhancement workflow on a single item of the catalog,
     include the output files as catalog assets and upload these to the storage.
@@ -158,6 +175,7 @@ def run_single_item(catalog, item_id, band_keys, metadata_key,
     :param band_keys: list of bands required for the shadow transform
     :param metadata_key: metadata asset key
     :param shadow_transform: type of shadow transform algorithm employed
+    :param bbox: bounds of the area of interest
     :param macaroon_path: path to dCache token
     :return: STAC item object with assets included
     """
@@ -175,15 +193,29 @@ def run_single_item(catalog, item_id, band_keys, metadata_key,
                          item_id, dcache)
     metadata = assets.pop(metadata_key)
 
+    # extract data from bands
+    _band = assets[band_keys[0]]
+    bbox_indices = _get_bbox_indices(_band.x, _band.y, bbox) \
+        if bbox is not None else None
+
+    bands = [assets[k] for k in band_keys]
+    bands = bands if bbox is None else [b.rio.slice_xy(*bbox) for b in bands]
+    crs = bands[0].spatial_ref.crs_wkt
+    transform = bands[0].rio.transform()
+    blue, green, red, NIR = [b.squeeze().data for b in bands]
+
     # work in temporary directory
+    properties = dict(shadow_transform=shadow_transform)
+    date_created = item.datetime.strftime("%Y:%m:%d %H:%M:%S")
     with tempfile.TemporaryDirectory(dir="./") as tmpdir:
         work_path = os.path.abspath(tmpdir)
-        _generate_shadow_images(shadow_transform,
-                                [assets[k] for k in band_keys],
-                                metadata, item, work_path)
-        for asset_key in item.assets.keys():
-            # upload asset
-            copy_asset(catalog, asset_key=asset_key, update_catalog=True,
+        assets = _generate_shadow_images(shadow_transform, metadata, work_path,
+                                         crs, transform, blue, green, red, NIR,
+                                         bbox_indices, date_created)
+        for key, href in assets.items():
+            asset = pystac.Asset(href=href, properties=properties)
+            item.add_asset(key, asset)
+            copy_asset(catalog, asset_key=key, update_catalog=True,
                        item_id=item_id, filesystem_to=dcache,
                        max_workers=1)
     return catalog.get_item(item_id, recursive=True).assets
@@ -196,8 +228,8 @@ def main(config_filename):
         input
     """
 
-    (catalog_url, collection_id, macaroon_path, shadow_transform, max_workers) = \
-        _parse_config_file(config_filename)
+    (catalog_url, collection_id, macaroon_path, shadow_transform, bbox,
+     max_workers) = _parse_config_file(config_filename)
 
     # configure connection to dCache
     stac2dcache.configure(filesystem="dcache", token_filename=macaroon_path)
@@ -220,6 +252,7 @@ def main(config_filename):
                 band_keys=band_keys,
                 metadata_key="metadata",
                 shadow_transform=shadow_transform,
+                bbox=bbox,
                 macaroon_path=macaroon_path
             )
             future_to_items[future] = item
