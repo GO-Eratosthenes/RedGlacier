@@ -127,10 +127,11 @@ def _generate_shadow_images(shadow_transform, bands, metadata, item, work_path):
                             Nir=NIR, RedEdge=None, Shw=None)
     shadow_image_to_list(shadow, transform.to_gdal(), f"{work_path}/",
                          {'bbox': None})
-    (polygons, cast_conn) = create_shadow_polygons(shadow, work_path)
+#    (polygons, cast_conn) = create_shadow_polygons(shadow, work_path)
 
     # save raster output and add assets to item
-    outputs = {'shadow': shadow, 'polygons': polygons, 'cast_conn': cast_conn}
+#    outputs = {'shadow': shadow, 'polygons': polygons, 'cast_conn': cast_conn}
+    outputs = {'shadow': shadow}
     datetime = item.datetime.strftime("%Y:%m:%d %H:%M:%S")
     properties = {'shadow_transform': shadow_transform}
     for key, val in outputs.items():
