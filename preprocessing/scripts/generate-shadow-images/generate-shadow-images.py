@@ -245,6 +245,9 @@ def main(config_filename):
 
         future_to_items = {}
         for item in subcatalog.get_all_items():
+            # skip items that have assets already
+            if len(item.assets) == 2:
+                continue
             future = executor.submit(
                 run_single_item,
                 catalog=subcatalog,
@@ -261,6 +264,7 @@ def main(config_filename):
             item = future_to_items[future]
             item.assets = future.result()
             _save_catalog(catalog, catalog_url)
+            print(item)
 
 
 if __name__ == "__main__":
