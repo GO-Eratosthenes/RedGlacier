@@ -4,6 +4,7 @@ import sys
 import tempfile
 
 import numpy as np
+import morphsnakes as ms
 import pystac
 import stac2dcache
 
@@ -11,15 +12,15 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 
 from stac2dcache.utils import get_asset, copy_asset
 
+from eratosthenes.input.read_sentinel2 import read_mean_sun_angles_s2
 from eratosthenes.preprocessing.handler_multispec import get_shadow_bands
-from eratosthenes.preprocessing.shadow_transforms import enhance_shadow
+from eratosthenes.preprocessing.shadow_transforms import apply_shadow_transform
 from eratosthenes.preprocessing.shadow_geometry import shadow_image_to_list, \
     create_shadow_polygons
 from eratosthenes.generic.mapping_io import makeGeoIm
-
+from eratosthenes.postprocessing.solar_tools import make_shading
 
 CONFIG_FILENAME_DEFAULT = "generate-shadow-images.ini"
-
 
 def _parse_config_file(filename=None):
     """
@@ -47,7 +48,6 @@ def _parse_config_file(filename=None):
     return (catalog_url, collection_id, macaroon_path, shadow_transform,
             bbox, max_workers)
 
-
 def _read_catalog(url):
     """
     Read STAC catalog from URL
@@ -59,7 +59,6 @@ def _read_catalog(url):
     catalog = pystac.Catalog.from_file(url)
     return catalog
 
-
 def _save_catalog(catalog, url):
     """
     Save STAC catalog to URL
@@ -69,7 +68,6 @@ def _save_catalog(catalog, url):
     """
     url = url if not url.endswith("catalog.json") else os.path.split(url)[0]
     catalog.normalize_and_save(url, catalog_type=catalog.catalog_type)
-
 
 def _get_assets(catalog, asset_keys, item_id=None, filesystem=None):
     """
@@ -91,7 +89,6 @@ def _get_assets(catalog, asset_keys, item_id=None, filesystem=None):
         )
     return assets
 
-
 def _get_linked_object(item, link_key):
     """
     Resolve STAC object from item links.
@@ -102,7 +99,6 @@ def _get_linked_object(item, link_key):
     """
     link = item.get_links(link_key).pop().resolve_stac_object()
     return link.target
-
 
 def _get_bbox_indices(x, y, bbox):
     """
@@ -117,7 +113,6 @@ def _get_bbox_indices(x, y, bbox):
     yindices, = np.where((y >= miny) & (y <= maxy))
     return xindices[0], xindices[-1]+1, yindices[0], yindices[-1]+1
 
-
 def _generate_shadow_images(shadow_transform, metadata, work_path, crs,
                             transform, blue=None, green=None, red=None,
                             NIR=None, bbox=None, date_created=None):
@@ -125,15 +120,29 @@ def _generate_shadow_images(shadow_transform, metadata, work_path, crs,
     Run the shadow transform algorithm to produce all output files, and add
     links to these as STAC asset objects
 
-    :param shadow_transform: type of shadow transform algorithm employed
-    :param metadata: text of the metadata XML file
-    :param work_path: working directory path
-    :param crs: coordinate reference system
-    :param transform: geo-transformation
-    :param blue, green, red, NIR: arrays with the corresponding bands
-    :param bbox: bounds of the area of interest (in scene indices)
-    :param date_created: datetime string for image metadata
-    :return dictionary of assets paths
+    Parameters
+    ----------
+    shadow_transform : string
+        type of shadow transform algorithm employed
+    metadata : string
+        text of the metadata XML file
+    work_path : string
+        working directory path
+    crs : string
+        coordinate reference code
+    transform : tuple, size=(1,6)
+        affine transformation coefficients
+    blue, green, red, NIR : np.array, size=(m,n), dtype=float
+        arrays with the corresponding bands
+    bbox : np.array, size=(,4)
+        bounds of the area of interest (in scene indices)
+    date_created: datetime string
+        image metadata
+
+    Returns
+    -------
+    assets : dictionary
+        dictionary of assets paths
     """
     assets = {}
 
@@ -142,9 +151,20 @@ def _generate_shadow_images(shadow_transform, metadata, work_path, crs,
         f.write(metadata)
 
     # calculate shadow-enhanced images and other assets
-    shadow = enhance_shadow(shadow_transform, Blue=blue, Green=green, Red=red,
-                            Nir=NIR, RedEdge=None, Shw=None)
-    shadow_image_to_list(shadow, transform.to_gdal(), f"{work_path}/",
+    shadow,albedo = apply_shadow_transform(shadow_transform,
+                                    Blue=blue, Green=green, Red=red,
+                                    Nir=NIR, RedEdge=None, Shw=None)
+
+    # make shadowing image from DEM
+    (sun_zn, sun_az) = read_mean_sun_angles_s2(f"{work_path}/")
+    Shw = make_shadowing(Z, sun_az, sun_zn)
+
+    # classify shadow-enhanced image
+    classification = ms.morphological_chan_vese(shadow, 30, init_level_set=Shw,
+                                                lambda1=1, lambda2=1,
+                                                smoothing=0, albedo=albedo)
+
+    shadow_image_to_list(classification, transform.to_gdal(), f"{work_path}/",
                          {'bbox': bbox})
 
 #    (polygons, cast_conn) = create_shadow_polygons(shadow, work_path, bbox)
