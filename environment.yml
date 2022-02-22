@@ -16,6 +16,6 @@ dependencies:
   - pip:
       - sentinelsat
       - stac2dcache
-      - git+https://github.com/stac-utils/stactools 
+      - stactools 
       - git+https://github.com/stactools-packages/sentinel2
-
+      - git+https://github.com/GO-Eratosthenes/morphsnakes@albedo-included
