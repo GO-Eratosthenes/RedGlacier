@@ -1,0 +1,21 @@
+name: eratosthenes
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.8
+  - gcsfs
+  - geopandas
+  - gdal
+  - ipywidgets
+  - jupyterlab
+  - pystac-client 
+  - rioxarray
+  - shapely 
+  - pip
+  - pip:
+      - sentinelsat
+      - stac2dcache
+      - git+https://github.com/stac-utils/stactools 
+      - git+https://github.com/stactools-packages/sentinel2
+
