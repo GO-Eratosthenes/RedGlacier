@@ -17,7 +17,7 @@ from eratosthenes.preprocessing.handler_multispec import get_shadow_bands
 from eratosthenes.preprocessing.shadow_transforms import apply_shadow_transform
 from eratosthenes.preprocessing.shadow_geometry import shadow_image_to_list, \
     create_shadow_polygons
-from eratosthenes.generic.mapping_io import makeGeoIm
+from eratosthenes.generic.mapping_io import make_geo_im
 from eratosthenes.postprocessing.solar_tools import make_shading
 
 CONFIG_FILENAME_DEFAULT = "generate-shadow-images.ini"
@@ -151,9 +151,9 @@ def _generate_shadow_images(shadow_transform, metadata, work_path, crs,
         f.write(metadata)
 
     # calculate shadow-enhanced images and other assets
-    shadow,albedo = apply_shadow_transform(shadow_transform,
-                                    Blue=blue, Green=green, Red=red,
-                                    Nir=NIR, RedEdge=None, Shw=None)
+    shadow, albedo = apply_shadow_transform(shadow_transform,
+                                            Blue=blue, Green=green, Red=red,
+                                            Nir=NIR, RedEdge=None, Shw=None)
 
     # make shadowing image from DEM
     (sun_zn, sun_az) = read_mean_sun_angles_s2(f"{work_path}/")
@@ -178,8 +178,8 @@ def _generate_shadow_images(shadow_transform, metadata, work_path, crs,
     for key, val in outputs.items():
         path = f"{work_path}/{key}.tif"
         no_dat = np.nan if val.dtype.kind == 'f' else -9999
-        makeGeoIm(val, transform.to_gdal(), crs, path, no_dat=no_dat,
-                  meta_descr=shadow_transform, date_created=date_created)
+        make_geo_im(val, transform.to_gdal(), crs, path, no_dat=no_dat,
+                    meta_descr=shadow_transform, date_created=date_created)
         assets[key] = path
     return assets
 
