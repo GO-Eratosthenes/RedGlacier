@@ -18,7 +18,7 @@ from eratosthenes.preprocessing.shadow_transforms import apply_shadow_transform
 from eratosthenes.preprocessing.shadow_geometry import shadow_image_to_list, \
     create_shadow_polygons
 from eratosthenes.generic.mapping_io import make_geo_im
-from eratosthenes.postprocessing.solar_tools import make_shading
+from eratosthenes.postprocessing.solar_tools import make_shadowing
 
 CONFIG_FILENAME_DEFAULT = "generate-shadow-images.ini"
 
