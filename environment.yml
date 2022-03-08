@@ -13,6 +13,7 @@ dependencies:
   - shapely 
   - pip
   - pip:
+      - s2cloudless
       - sentinelsat
       - stac2dcache
       - stactools 
