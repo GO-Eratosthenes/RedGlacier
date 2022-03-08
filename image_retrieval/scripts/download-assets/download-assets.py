@@ -35,15 +35,14 @@ def _parse_config_file(filename=None):
     return catalog_url, collection_id, macaroon_path, asset_keys, max_workers
 
 
-def _read_catalog(url, filesystem=None):
+def _read_catalog(url, stac_io):
     """
     Read STAC catalog from URL
 
     :param url: urlpath to the catalog root
-    :param filesystem: filesystem instance
+    :param stac_io: StacIO instance
     :return: PyStac Catalog object
     """
-    stac_io = stac2dcache.configure_stac_io(filesystem)
     url = url if url.endswith("catalog.json") else f"{url}/catalog.json"
     catalog = pystac.Catalog.from_file(url, stac_io=stac_io)
     return catalog
@@ -99,17 +98,15 @@ def main(config_filename):
         _parse_config_file(config_filename)
 
     # configure connection to dCache
-    dcache_fs = stac2dcache.configure_filesystem(
-        filesystem="dcache", token_filename=macaroon_path
-    )
+    stac2dcache.configure(token_filename=macaroon_path)
 
-    catalog = _read_catalog(catalog_url, dcache_fs)
+    catalog = _read_catalog(catalog_url, stac2dcache.stac_io)
     subcatalog = catalog.get_child(collection_id) \
         if collection_id is not None else catalog
 
     download_assets(
         subcatalog,
-        fs_to=dcache_fs,
+        fs_to=stac2dcache.filesystem,
         asset_keys=asset_keys,
         max_workers=max_workers
     )
