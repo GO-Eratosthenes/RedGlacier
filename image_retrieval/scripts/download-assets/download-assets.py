@@ -106,7 +106,7 @@ def main(config_filename):
 
     download_assets(
         subcatalog,
-        fs_to=stac2dcache.filesystem,
+        fs_to=stac2dcache.fs,
         asset_keys=asset_keys,
         max_workers=max_workers
     )
