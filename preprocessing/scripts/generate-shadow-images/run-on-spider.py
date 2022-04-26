@@ -70,10 +70,11 @@ def _submit_slurm_script(file_path, directory):
     :param directory: work directory where to submit the job script
     :return:
     """
+    _file_path = os.path.abspath(file_path)
     cwd = os.getcwd()
     try:
         os.chdir(directory)
-        subprocess.run(["sbatch", os.path.abspath(file_path)])
+        subprocess.run(["sbatch", _file_path])
     finally:
         os.chdir(cwd)
 
