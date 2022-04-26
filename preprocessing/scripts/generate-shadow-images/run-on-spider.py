@@ -49,33 +49,31 @@ def _read_catalog(url, stac_io=None):
     return catalog
 
 
-def _write_slurm_script(filename, directory, file_template, **kwargs):
+def _write_slurm_script(file_path, file_template, **kwargs):
     """
     Write out SLURM batch job script
 
-    :param filename:
-    :param directory:
+    :param file_path:
     :param file_template:
     :param kwargs: parameter dictionary to write out the script
     """
-    os.makedirs(directory, exist_ok=True)
-    filepath = os.path.join(directory, filename)
-    with open(filepath, "w") as f:
+    os.makedirs(os.path.dirname(file_path), exist_ok=True)
+    with open(file_path, "w") as f:
         f.write(file_template.format(**kwargs))
 
 
-def _submit_slurm_script(filename, directory):
+def _submit_slurm_script(file_path, directory):
     """
     Submit the batch job script to the SLURM scheduler
 
-    :param filename:
+    :param file_path:
     :param directory: work directory where to submit the job script
     :return:
     """
     cwd = os.getcwd()
     try:
         os.chdir(directory)
-        subprocess.run(["sbatch", filename])
+        subprocess.run(["sbatch", os.path.abspath(file_path)])
     finally:
         os.chdir(cwd)
 
@@ -93,10 +91,11 @@ def main():
     )
     # loop over all items
     for item in catalog.get_all_items():
-        scriptname = f"{item.id}.bsh"
-        inputs["item_id"] = item.id
-        _write_slurm_script(scriptname, RUN_DIR, TEMPLATE_SCRIPT, **inputs)
-        _submit_slurm_script(scriptname, RUN_DIR)
+        script_path = f"{RUN_DIR}/{item.id}.bsh"
+        if not os.path.isfile(script_path):
+            inputs["item_id"] = item.id
+            _write_slurm_script(script_path, TEMPLATE_SCRIPT, **inputs)
+            _submit_slurm_script(script_path, RUN_DIR)
 
 
 if __name__ == "__main__":
