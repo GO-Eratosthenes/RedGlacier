@@ -31,7 +31,7 @@ bbox = 490229 6642656 516134 6660489
 item_id = {item_id}
 EOF
 
-${HOME}/mambaforge/envs/eratosthenes/bin/python ${HOME}/RedGlacier/preprocessing/scripts/generate-shadow-images/generate-shadow-images.py $input_filename
+$HOME/mambaforge/envs/eratosthenes/bin/python $HOME/RedGlacier/preprocessing/scripts/generate-shadow-images/generate-shadow-images.py $input_filename
 
 """
 
