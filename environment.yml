@@ -19,4 +19,4 @@ dependencies:
       - stactools 
       - git+https://github.com/stactools-packages/sentinel2
       - git+https://github.com/GO-Eratosthenes/morphsnakes@albedo-included
-      - git+https://github.com/GO-Eratosthenes/start-code
+      - git+https://github.com/GO-Eratosthenes/dhdt
