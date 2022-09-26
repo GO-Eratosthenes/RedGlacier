@@ -21,60 +21,61 @@ cd $TMPDIR
 input_filename={item_id}.ini
 
 cat <<EOF | tee $input_filename
-[generate-shadow-images]
+[preprocess-item]
 catalog_url = {catalog_url}
 dem_url = https://webdav.grid.surfsara.nl:2880/pnfs/grid.sara.nl/data/eratosthenes/disk/CopernicusDEM_tiles_sentinel-2/COP-DEM-05VMG.tif
 macaroon_path = {macaroon_path}
-shadow_transform = entropy
-angle = 138
+window_size = 16
+shade_removal_angle = 138
 bbox = 490229 6642656 516134 6660489
 item_id = {item_id}
 EOF
 
-$HOME/mambaforge/envs/eratosthenes/bin/python $HOME/RedGlacier/preprocessing/scripts/generate-shadow-images/generate-shadow-images.py $input_filename
+$HOME/mambaforge/envs/eratosthenes/bin/python $HOME/RedGlacier/preprocessing/scripts/run-preprocessing/preprocess-item.py $input_filename
 
 """
 
 
-def _read_catalog(url, stac_io=None):
+def _read_catalog(urlpath, stac_io=None):
     """
-    Read STAC catalog from URL
+    Read STAC catalog from URL/path
 
-    :param url: urlpath to the catalog root
-    :param stac_io: (optional) STAC IO instance to read the catalog
-    :return: PySTAC Catalog object
+    :param urlpath: URL/path to the catalog root
+    :param stac_io (optional): STAC IO instance to read the catalog
+    :return: PyStac Catalog object
     """
-    url = url if url.endswith("catalog.json") else f"{url}/catalog.json"
-    catalog = pystac.Catalog.from_file(url, stac_io=stac_io)
+    urlpath = urlpath \
+        if urlpath.endswith("catalog.json") \
+        else f"{urlpath}/catalog.json"
+    catalog = pystac.Catalog.from_file(urlpath, stac_io=stac_io)
     return catalog
 
 
-def _write_slurm_script(file_path, file_template, **kwargs):
+def _write_slurm_script(path, template, **kwargs):
     """
     Write out SLURM batch job script
 
-    :param file_path:
-    :param file_template:
-    :param kwargs: parameter dictionary to write out the script
+    :param path:
+    :param template:
+    :param kwargs: parameter dictionary to fill in the template
     """
-    os.makedirs(os.path.dirname(file_path), exist_ok=True)
-    with open(file_path, "w") as f:
-        f.write(file_template.format(**kwargs))
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        f.write(template.format(**kwargs))
 
 
-def _submit_slurm_script(file_path, directory):
+def _submit_slurm_script(path, directory):
     """
     Submit the batch job script to the SLURM scheduler
 
-    :param file_path:
+    :param path:
     :param directory: work directory where to submit the job script
-    :return:
     """
-    _file_path = os.path.abspath(file_path)
+    abspath = os.path.abspath(path)
     cwd = os.getcwd()
     try:
         os.chdir(directory)
-        subprocess.run(["sbatch", _file_path])
+        subprocess.run(["sbatch", abspath])
     finally:
         os.chdir(cwd)
 

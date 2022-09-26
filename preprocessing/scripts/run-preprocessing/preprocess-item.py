@@ -2,26 +2,32 @@ import configparser
 import os
 import sys
 
-import numpy as np
+import fsspec
 import morphsnakes as ms
+import numpy as np
 import pystac
 import rasterio
+import rioxarray
 import stac2dcache
 
-from pystac.extensions.eo import EOExtension
-from pystac.extensions.projection import ProjectionExtension
+from dhdt.generic.mapping_tools import pix2map
+from dhdt.input.read_sentinel2 import \
+    list_central_wavelength_msi, read_detector_mask, read_view_angles_s2, \
+    read_sun_angles_s2, read_mean_sun_angles_s2, s2_dn2toa
+from dhdt.preprocessing.shadow_transforms import entropy_shade_removal
+from dhdt.preprocessing.shadow_geometry import shadow_image_to_list
+from dhdt.postprocessing.solar_tools import make_shading, make_shadowing
+from dhdt.preprocessing.acquisition_geometry import \
+    get_template_aspect_slope, compensate_ortho_offset
+from dhdt.processing.coupling_tools import match_pair
+from dhdt.processing.matching_tools import get_coordinates_of_template_centers
+from dhdt.generic.mapping_io import make_geo_im
 
-from stac2dcache.drivers import get_driver
 
-from eratosthenes.input.read_sentinel2 import read_mean_sun_angles_s2
-from eratosthenes.preprocessing.handler_multispec import get_shadow_bands
-from eratosthenes.preprocessing.shadow_transforms import apply_shadow_transform
-from eratosthenes.preprocessing.shadow_geometry import shadow_image_to_list
-from eratosthenes.generic.mapping_io import make_geo_im
-from eratosthenes.postprocessing.solar_tools import make_shadowing
+CONFIG_FILENAME_DEFAULT = "preprocess-item.ini"
 
-
-CONFIG_FILENAME_DEFAULT = "generate-shadow-images.ini"
+BOI = ["red", "green", "blue", "nir"]
+WORK_DIR = "./"
 
 
 def _parse_config_file(filename=None):
@@ -40,227 +46,358 @@ def _parse_config_file(filename=None):
     catalog_url = config.pop("catalog_url")
     dem_url = config.pop("dem_url")
     macaroon_path = config.pop("macaroon_path")
-    shadow_transform = config.pop("shadow_transform")
-    angle = config.pop("angle", None)
-    angle = float(angle) if angle is not None else None
-    bbox = config.pop("bbox", None)
-    bbox = [float(el) for el in bbox.split()] if bbox is not None else bbox
+    window_size = config.pop("window_size")
+    shade_removal_angle = config.pop("shade_removal_angle")
+    bbox = config.pop("bbox")
     item_id = config.pop("item_id")
+
+    # fix data types
+    window_size = int(window_size)
+    shade_removal_angle = float(shade_removal_angle)
+    bbox = [float(el) for el in bbox.split()]
 
     assert len(config) == 0, ("Unknown keys: "
                               "{}".format([k for k in config.keys()]))
     return (
-        catalog_url, dem_url, macaroon_path, shadow_transform, angle, bbox,
-        item_id
+        catalog_url, dem_url, macaroon_path, window_size, shade_removal_angle,
+        bbox, item_id
     )
 
 
-def _read_catalog(url, stac_io=None):
+def _read_catalog(urlpath, stac_io=None):
     """
-    Read STAC catalog from URL
+    Read STAC catalog from URL/path
 
-    :param url: urlpath to the catalog root
-    :param stac_io: (optional) STAC IO instance to read the catalog
+    :param urlpath: URL/path to the catalog root
+    :param stac_io (optional): STAC IO instance to read the catalog
     :return: PySTAC Catalog object
     """
-    url = url if url.endswith("catalog.json") else f"{url}/catalog.json"
-    catalog = pystac.Catalog.from_file(url, stac_io=stac_io)
+    urlpath = urlpath \
+        if urlpath.endswith("catalog.json") \
+        else f"{urlpath}/catalog.json"
+    catalog = pystac.Catalog.from_file(urlpath, stac_io=stac_io)
     return catalog
 
 
-def _read_remote_file(url, filesystem, **kwargs):
+def _open_raster_file(path, bbox=None, load=True):
     """
-    Read remote file from URL
+    Open a raster file as a single-band DataArray
 
-    :param url: urlpath to the file (guess driver from extension)
-    :param filesystem: filesystem object where to read the file
-    :return: file object
+    :param path: path to the file
+    :param bbox: crop the raster using the provided bounding box
+    :param load: if True, load the raster content
+    :return: raster data as a DataArray object
     """
-    driver = get_driver(url)
-    driver.set_filesystem(filesystem)
-    return driver.get(**kwargs)
+    da = rioxarray.open_rasterio(path, mask_and_scale=True)
+    if bbox is not None:
+        da = da.rio.slice_xy(*bbox)
+    if load:
+        da.load()
+    return da.squeeze()
+
+
+def _copy_file_to_local(urlpath, local_dir, filesystem=None):
+    """
+    Copy file from URL/path to (local) directory
+
+    :param urlpath: URL/path to the file
+    :param local_dir: destination path
+    :param filesystem: filesystem instance to read the file
+    :return: path to the downloaded file
+    """
+    if filesystem is None:
+        filesystem = fsspec.get_filesystem_class(urlpath)()
+    filesystem.get(urlpath, local_dir)
+    _, filename = os.path.split(urlpath)
+    return os.path.join(local_dir, filename)
 
 
 def _get_bbox_indices(x, y, bbox):
     """
     Convert bbox values to array indices
 
-    :param x, y: arrays with the X, Y coordinates
+    :param x: array with the X coordinates
+    :param y: array with the Y coordinates
     :param bbox: minx, miny, maxx, maxy values
     :return: bbox converted to array indices
     """
     minx, miny, maxx, maxy = bbox
     xindices, = np.where((x >= minx) & (x <= maxx))
     yindices, = np.where((y >= miny) & (y <= maxy))
-    return xindices[0], xindices[-1]+1, yindices[0], yindices[-1]+1
+    return yindices[0], yindices[-1] + 1, xindices[0], xindices[-1] + 1
 
 
-def _run_shadow_classification(
-        shadow_transform, angle, dem, blue, green, red, NIR, metadata,
-        cloud_mask, bbox, crs, transform, date_created, work_path="./"
-):
+def _download_input_files(item, dem_url):
     """
-    Run the shadow transform algorithm to produce all output files, and add
-    links to these as STAC asset objects
-
-    :param shadow_transform: type of shadow transform algorithm employed
-    :param angle: angle used by the shadow transform algorithm
-    :param dem: digital elevation model (DEM) raster
-    :param blue: blue band raster
-    :param green: green band raster
-    :param red: red band raster
-    :param NIR: near infrared band raster
-    :param metadata: granule metadata text
-    :param cloud_mask: cloud mask raster
-    :param bbox: bounds of the area of interest (in scene indices)
-    :param crs: coordinate reference system (in WKT) 
-    :param transform: transform (GDAL compatible)
-    :param date_created: datetime of the asset
-    :param work_path: temporary path
-    :return: dictionary of assets paths
-    """
-    assets = {}
-
-    # write out metadata file, needed by eratosthenes functions
-    with open(f"{work_path}/MTD_TL.xml", "w") as f:
-        f.write(metadata)
-
-    # generate shadow-enhanced image
-    shadow, albedo = apply_shadow_transform(
-        shadow_transform, Blue=blue, Green=green, Red=red, Near=NIR, a=angle,
-        RedEdge=None, Shw=None
-    )
-
-    # make shadowing image from DEM
-    (sun_zn, sun_az) = read_mean_sun_angles_s2(work_path)
-    shadow_artificial = make_shadowing(dem, sun_az, sun_zn)
-
-    # classify shadow-enhanced image
-    classification = ms.morphological_chan_vese(
-        shadow, 30, init_level_set=shadow_artificial, lambda1=1, lambda2=1,
-        smoothing=0, albedo=albedo, mask=cloud_mask
-    )
-
-    shadow_image_to_list(
-        classification, transform, work_path, Zn=sun_zn, Az=sun_az, bbox=bbox
-    )
-
-    # save raster output files
-    outputs = {
-        "shadow": shadow.astype("float64"),
-        "albedo": albedo.astype("float64"),
-        "shadow_artificial": shadow_artificial,
-        "classification": classification,
-    }
-    if cloud_mask is not None:
-        outputs["cloud_mask"] = cloud_mask
-    for key, val in outputs.items():
-        path = f"{work_path}/{key}.tif"
-        no_dat = np.nan if val.dtype.kind == 'f' else -9999
-        make_geo_im(val, transform, crs, path, no_dat=no_dat,
-                    date_created=date_created)
-        assets[key] = path
-
-    # add connectivity txt file to the asset dictionary
-    assets["connectivity"] = f"{work_path}/conn.txt"
-    return assets
-
-
-def shadow_classification(item, dem_url, shadow_transform, angle, bbox):
-    """
-    Run the shadow-enhancement workflow on a single item of the catalog,
-    include the output files as catalog assets and upload these to the storage
+    Download input files from dCache storage to working directory
 
     :param item: PySTAC Item object corresponding to the scene to work on
     :param dem_url: urlpath to the rasterized digital elevation model
-    :param shadow_transform: type of shadow transform algorithm employed
-    :param angle: angle used by the shadow transform algorithm
-    :param bbox: bounds of the area of interest
-    :return: STAC item object with assets included
+    :return: dictionary including paths to local input files
     """
-    # resolve links to L1C and L2A items
-    item_l1c_link = item.get_single_link("item-L1C")
-    item_l1c = pystac.Item.from_file(
-        item_l1c_link.get_absolute_href(), stac_io=stac2dcache.stac_io
-    )
-    item_l2a_link = item.get_single_link("item-L2A")
-    if item_l2a_link is not None:
-        item_l2a = pystac.Item.from_file(
-            item_l2a_link.get_absolute_href(), stac_io=stac2dcache.stac_io
+    s2_df = list_central_wavelength_msi()
+    s2_df = s2_df[s2_df['common_name'].isin(BOI)]
+
+    assets_per_item = {
+        "item-L1C": [
+            *(band for band in s2_df.index),
+            *(f"sensor-metadata-{band}" for band in s2_df.index),
+            "granule-metadata",
+            "product-metadata",
+        ],
+        "item-L2A": ["SCL"]
+    }
+
+    # load asset hrefs
+    assets = {"DEM": dem_url}
+    for item_id, asset_keys in assets_per_item.items():
+        item_link = item.get_single_link(item_id)
+        if item_link is not None:
+            _item = pystac.Item.from_file(
+                item_link.get_absolute_href(), stac_io=stac2dcache.stac_io
+            )
+            for asset_key in asset_keys:
+                assets[asset_key] = _item.assets[asset_key].get_absolute_href()
+
+    # copy files to local
+    for key, href in assets.items():
+        assets[key] = _copy_file_to_local(
+            href, WORK_DIR, filesystem=stac2dcache.fs
         )
-    else:
-        item_l2a = None
+    return assets
 
-    # get bands and granule metadata from L1C item
-    hrefs = [
-        item_l1c.assets[f"B{band:02}"].get_absolute_href()
-        for band in get_shadow_bands("sentinel-2")
-    ]
-    bands = [
-        _read_remote_file(href, stac2dcache.fs, masked=True) for href in hrefs
-    ]
-    metadata = _read_remote_file(
-        item_l1c.assets["granule-metadata"].get_absolute_href(),
-        stac2dcache.fs
-    )
 
-    # get scene classification layer from L2A item (if available)
-    if item_l2a is not None:
-        scl = _read_remote_file(
-            item_l2a.assets["SCL"].get_absolute_href(),
-            stac2dcache.fs,
-            masked=True,
-        )
-    else:
-        scl = None
+def _get_raster_info(path, bbox):
+    """
+    Get geo-information from a (cropped) raster file
 
-    # get digital elevation model
-    dem = _read_remote_file(dem_url, stac2dcache.fs, masked=True)
+    :param path: path to raster file
+    :param bbox: crop the raster using the provided bounding box
+    :return: bbox converted to array indices, coordinate reference system and
+        geo-transform
+    """
+    raster = _open_raster_file(path, load=False)
+    bbox_idx = _get_bbox_indices(raster.x, raster.y, bbox)
+    crs = raster.rio.crs
+    transform = raster.rio.transform().to_gdal()
+    return bbox_idx, crs, transform
 
-    # get info required to run classification
-    input_parameters = {"shadow_transform": shadow_transform, "angle": angle}
-    bbox_indices = _get_bbox_indices(bands[0].x, bands[0].y, bbox)
-    crs = bands[0].rio.crs.to_wkt()
-    epsg = bands[0].rio.crs.to_epsg()
-    transform = bands[0].rio.transform().to_gdal()
-    date_created = item.datetime.strftime("%Y:%m:%d %H:%M:%S")
 
-    # homogenize rasters
-    bands = [b.rio.slice_xy(*bbox) for b in bands]
-    blue, green, red, NIR = [b.squeeze().data for b in bands]
+def _load_input_rasters(assets, bbox):
+    """
+    Load and preprocess input raster files
 
-    dem = dem.rio.slice_xy(*bbox)
-    dem = dem.squeeze().data
+    :param assets: dictionary to local input files
+    :param bbox: crop the raster using the provided bounding box
+    :return: raster bands, rasterized DEM, stable mask
+    """
+    s2_df = list_central_wavelength_msi()
+    s2_df = s2_df[s2_df['common_name'].isin(BOI)]
 
-    if scl is not None:
-        # crop and upscale scene classification layer
+    # bands
+    bands = {
+        v: _open_raster_file(assets[k], bbox=bbox, load=True)
+        for k, v in s2_df["common_name"].items()
+    }
+    bands = {k: s2_dn2toa(v) for k, v in bands.items()}
+
+    # digital elevation model
+    dem = _open_raster_file(assets["DEM"], bbox=bbox, load=True)
+    stable = dem > 0
+
+    # scene classification layer
+    if "SCL" in assets:
+        scl = _open_raster_file(assets["SCL"], bbox=bbox, load=True)
         scl = scl.rio.reproject_match(
-            bands[0], resampling=rasterio.enums.Resampling.nearest
+            dem, resampling=rasterio.enums.Resampling.nearest
         )
-        scl = scl.squeeze().data
+        cloud_mask = scl == 9
+        stable = stable & ~cloud_mask
 
-    # get cloud mask from scene classification layer
-    cloud_mask = scl == 9 if scl is not None else None  # 9 -> high cloud prob
+    return bands, dem, stable
 
-    assets = _run_shadow_classification(
-        shadow_transform, angle, dem, blue, green, red, NIR, metadata,
-        cloud_mask, bbox_indices, crs, transform, date_created
+
+def _load_input_metadata(bbox_idx, transform):
+    """
+    Load and preprocess spatial metadata at pixel level
+
+    :param bbox_idx: crop the metadata using the provided array indices
+    :param transform: geo-transform
+    :return: zenith and azimuth sun angles, mean zenith and azimuth sun angles,
+        zenith and azimuth view angles
+    """
+
+    # use red band as reference band
+    s2_df = list_central_wavelength_msi()
+    s2_df = s2_df[s2_df['common_name'] == "red"]
+
+    # get sun angles
+    sun_zn, sun_az = read_sun_angles_s2(WORK_DIR)
+
+    # get mean sun angles
+    sun_zn_mean, sun_az_mean = read_mean_sun_angles_s2(WORK_DIR)
+
+    # get sensor configuration
+    det_stack = read_detector_mask(WORK_DIR, s2_df, transform)
+
+    # get sensor viewing angles
+    view_zn, view_az = read_view_angles_s2(
+        WORK_DIR, det_stack=det_stack, boi_df=s2_df
     )
 
-    # update item
-    _item = item.clone()
-    _item.properties.update({"input_parameters": input_parameters})
+    # crop interpolated sun and view angles
+    sun_zn = sun_zn[bbox_idx[0]:bbox_idx[1], bbox_idx[2]:bbox_idx[3]]
+    sun_az = sun_az[bbox_idx[0]:bbox_idx[1], bbox_idx[2]:bbox_idx[3]]
+    view_zn = view_zn[bbox_idx[0]:bbox_idx[1], bbox_idx[2]:bbox_idx[3]]
+    view_az = view_az[bbox_idx[0]:bbox_idx[1], bbox_idx[2]:bbox_idx[3]]
 
-    if cloud_mask is not None:
-        # EO extension
-        item_eo = EOExtension.ext(_item, add_if_missing=True)
-        item_eo.cloud_cover = cloud_mask.sum() / cloud_mask.size
+    return sun_zn, sun_az, sun_zn_mean, sun_az_mean, view_zn, view_az
 
-    # projection extension
-    item_projection = ProjectionExtension.ext(_item, add_if_missing=True)
-    item_projection.epsg = epsg
+
+def _compute_shadow_images(
+        bands, dem, sun_zn, sun_az, sun_zn_mean, sun_az_mean,
+        shade_removal_angle
+):
+    """
+    Compute shadow-enhanced images and DEM-based artificial images
+
+    :param bands: dictionary including raster bands
+    :param dem: rasterized digital elevation model
+    :param sun_zn: zenith sun angle
+    :param sun_az: azimuth sun angle
+    :param sun_zn_mean: mean zenith sun angle
+    :param sun_az_mean: mean azimuth sun angle
+    :param shade_removal_angle: angle for entropy shade removal
+    :return: shadow image, albedo image, artificial shadowing and shading
+    """
+    # compute shadow-enhanced image
+    shadow, albedo = entropy_shade_removal(
+        bands["blue"].data, bands["red"].data, bands["nir"].data,
+        a=shade_removal_angle,
+    )
+
+    # construct artificial images
+    shadow_art = make_shadowing(dem.data, sun_az_mean, sun_zn_mean)
+    shade_art = make_shading(dem.data, sun_az, sun_zn)
+
+    return shadow, albedo, shadow_art, shade_art
+
+
+def _coregister(
+        shadow, albedo, shade_art, dem, stable, view_zn, view_az, window_size,
+        transform
+):
+    """
+    Co-register shadow and albedo rasters using an artificial shading image as
+    a target
+
+    :param shadow: shadow image
+    :param albedo: albedo image
+    :param shade_art: artificial shading image
+    :param dem: rasterized digital elevation model
+    :param stable: mask for stable terrain
+    :param view_zn: zenith view angle
+    :param view_az: azimuth view angle
+    :param window_size: size of the windows employed for coregistration
+    :param transform: geo-transform
+    :return: co-registered shadow and albedo images
+    """
+
+    ii, jj = get_coordinates_of_template_centers(dem.data, window_size)
+    xx, yy = pix2map(transform, ii, jj)
+    match_x, match_y, match_score = match_pair(
+        shadow, shade_art, stable.data, stable.data, transform, transform,
+        xx, yy, temp_radius=window_size, search_radius=window_size,
+        correlator='ampl_comp', subpix='moment', metric='peak_entr'
+    )
+
+    dy, dx = yy - match_y, xx - match_x
+
+    slope, aspect = get_template_aspect_slope(dem.data, ii, jj, window_size)
+
+    pure = np.logical_and(~np.isnan(dx), slope < 20)
+    dx_coreg, dy_coreg = np.median(dx[pure]), np.median(dy[pure])
+
+    shadow_ort = compensate_ortho_offset(
+        shadow, dem.data, dx_coreg, dy_coreg, view_az, view_zn, transform
+    )
+    albedo_ort = compensate_ortho_offset(
+        albedo, dem.data, dx_coreg, dy_coreg, view_az, view_zn, transform
+    )
+    return shadow_ort, albedo_ort
+
+
+def _compute_shadow_classification(
+        shadow, albedo, shadow_art, stable, sun_zn_mean, sun_az_mean,
+        transform, bbox_idx
+):
+    """
+    Run the shadow classification algorithm on the shadow image
+
+    :param shadow: shadow image
+    :param albedo: albedo image
+    :param shadow_art: artificial shadow image
+    :param stable: mask for stable terrain
+    :param sun_zn_mean: zenith sun angle
+    :param sun_az_mean: azimuth sun angle
+    :param transform: geo-transform
+    :param bbox_idx: array indices for cropping
+    :return: classification map
+    """
+    # classify shadow-enhanced image
+    classification = ms.morphological_chan_vese(
+        shadow, 30, init_level_set=shadow_art, lambda1=1, lambda2=1,
+        smoothing=0, albedo=albedo, mask=stable
+    )
+
+    shadow_image_to_list(
+        classification, transform, WORK_DIR, Zn=sun_zn_mean, Az=sun_az_mean,
+        bbox=bbox_idx
+    )
+    return classification
+
+
+def _add_output_to_item(
+        item, shadow, albedo, shadow_art, shade_art, stable, classification,
+        crs, transform
+):
+    """
+    Upload output to dCache storage, linking the assets to the catalog item
+
+    :param item: PySTAC item where to add output
+    :param shadow: shadow image
+    :param albedo: albedo image
+    :param shadow_art: artificial shadow image
+    :param shade_art: artificial shading image
+    :param stable: mask for stable terrain
+    :param classification: classification map
+    :param crs: coordinate reference system
+    :param transform: geo-transform
+    :return: updated PySTAC item object
+    """
+    # add connectivity txt file to the asset dictionary
+    assets = {"connectivity": f"{WORK_DIR}/conn.txt"}
+
+    # save raster output files
+    outputs = {
+        "shadow": shadow,
+        "albedo": albedo,
+        "shadow_artificial": shadow_art,
+        "shade_artificial": shade_art,
+        "stable_mask": stable,
+        "classification": classification,
+    }
+    for key, val in outputs.items():
+        path = f"{WORK_DIR}/{key}.tif"
+        no_dat = np.nan if val.dtype.kind == 'f' else -9999
+        make_geo_im(
+            val, transform, crs, path, no_dat=no_dat,
+            date_created=item.datetime.strftime("%Y:%m:%d %H:%M:%S")
+        )
+        assets[key] = path
 
     # upload assets and link them to the item
+    _item = item.clone()
     item_dir, _ = os.path.split(_item.get_self_href())
     for asset_key, lpath in assets.items():
         _, filename = os.path.split(lpath)
@@ -273,13 +410,14 @@ def shadow_classification(item, dem_url, shadow_transform, angle, bbox):
 
 def main(config_filename):
     """
+    Run the preprocessing workflow for one scene
 
     :param config_filename: name of the config file where to read the input
         from
     """
 
-    (catalog_url, dem_url, macaroon_path, shadow_transform, angle, bbox,
-        item_id) = _parse_config_file(config_filename)
+    (catalog_url, dem_url, macaroon_path, window_size, shade_removal_angle,
+        bbox, item_id) = _parse_config_file(config_filename)
 
     # configure connection to dCache
     stac2dcache.configure(token_filename=macaroon_path)
@@ -290,8 +428,34 @@ def main(config_filename):
 
     assert item is not None, f"Item {item_id} not found!"
 
-    # run shadow classification
-    item = shadow_classification(item, dem_url, shadow_transform, angle, bbox)
+    # download input files to local
+    assets = _download_input_files(item, dem_url)
+
+    # load and preprocess relevant data
+    bbox_idx, crs, transform = _get_raster_info(assets["B02"], bbox)
+    bands, dem, stable = _load_input_rasters(assets, bbox)
+    sun_zn, sun_az, sun_zn_mean, sun_az_mean, view_zn, view_az = \
+        _load_input_metadata(bbox_idx, transform)
+
+    # run preprocessing steps
+    shadow, albedo, shadow_art, shade_art = _compute_shadow_images(
+        bands, dem, sun_zn, sun_az, sun_zn_mean, sun_az_mean,
+        shade_removal_angle
+    )
+    shadow, albedo = _coregister(
+        shadow, albedo, shade_art, dem, stable, view_zn, view_az, window_size,
+        transform
+    )
+    classification = _compute_shadow_classification(
+        shadow, albedo, shadow_art, stable, sun_zn_mean, sun_az_mean,
+        transform, bbox_idx
+    )
+
+    # write out raster output and add these as assets to the catalog item
+    item = _add_output_to_item(
+        item, shadow, albedo, shadow_art, shade_art, stable, classification,
+        crs, transform
+    )
 
     # save updated item
     item.save_object()
