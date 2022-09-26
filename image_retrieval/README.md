@@ -1,16 +1,7 @@
 # Image Retrieval
 
-Red Glacier coordinates: +60.0104841N, -153.0253818E (MGRS Tile: 05VMG)
+Red Glacier coordinates: +60.0104841, -153.0253818 (MGRS Tile: 05VMG)
 
-* Sentinel-2 data: 
-  * Using [this notebook](notebooks/01-search-Sentinel-2-catalogs.ipynb) we have searched available data on the 
-  [Earth Search STAC catalogs](https://earth-search.aws.element84.com/v0) for 
-  [AWS Sentinel-2 Datasets](https://registry.opendata.aws/sentinel-2). The items corresponding to data processed at
-  both levels 1C and 2A (the latter, converted from JPEG2000 to cloud-optimized GeoTIFF format) have been saved in a 
-  STAC catalog and saved on the dCache storage.
-  * The catalog items from the level-1C collection have been re-linked to assets from the 
-  [Google Cloud Storage](https://cloud.google.com/storage/docs/public-datasets/sentinel-2) public dataset, 
-  since the corresponding AWS dataset is only available as requester-pays (see 
-  [this notebook](notebooks/02-link-assets-to-gcs.ipynb)).
-  * The assets corresponding to the Red, Blue, Green and NIR bands, and the original XML metadata file from the items 
-  of the level-1C collection have been downloaded using [this script](scripts/download-assets). 
+* The folder [notebooks/create-catalogs](./notebooks/create-catalogs) contain notebooks employed to create STAC catalogs with the Sentinel-2 MGRS tiles that include the Red Glacier, and to save these metadata collections on the SURF dCache storage system.
+* The folder [scripts/download-assets](./scripts/download-assets) include the scripts employed to retrieve the assets that are linked to the catalog items and to save them on the dCache storage system for later reuse.
+* In order to work with the assets stored on the dCache system, have a look at [the tutorial notebook of STAC2dCache](https://github.com/NLeSC-GO-common-infrastructure/stac2dcache/blob/main/notebooks/tutorial.ipynb).

@@ -1,7 +1,6 @@
 name: eratosthenes
 channels:
   - conda-forge
-  - defaults
 dependencies:
   - python=3.8
   - gcsfs
@@ -14,8 +13,10 @@ dependencies:
   - shapely 
   - pip
   - pip:
+      - s2cloudless
       - sentinelsat
       - stac2dcache
-      - git+https://github.com/stac-utils/stactools 
+      - stactools 
       - git+https://github.com/stactools-packages/sentinel2
-
+      - git+https://github.com/GO-Eratosthenes/morphsnakes@albedo-included
+      - git+https://github.com/GO-Eratosthenes/dhdt
