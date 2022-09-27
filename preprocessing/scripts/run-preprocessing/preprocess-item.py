@@ -48,8 +48,8 @@ def _parse_config_file(filename=None):
     parser.read(filename)
     config = parser["preprocess-item"]
 
-    catalog_url = config.pop("catalog_url")
-    dem_url = config.pop("dem_url")
+    catalog_urlpath = config.pop("catalog_urlpath")
+    dem_urlpath = config.pop("dem_urlpath")
     macaroon_path = config.pop("macaroon_path")
     window_size = config.pop("window_size")
     shade_removal_angle = config.pop("shade_removal_angle")
@@ -64,8 +64,8 @@ def _parse_config_file(filename=None):
     assert len(config) == 0, ("Unknown keys: "
                               "{}".format([k for k in config.keys()]))
     return (
-        catalog_url, dem_url, macaroon_path, window_size, shade_removal_angle,
-        bbox, item_id
+        catalog_urlpath, dem_urlpath, macaroon_path, window_size,
+        shade_removal_angle, bbox, item_id
     )
 
 
@@ -132,12 +132,11 @@ def _get_bbox_indices(x, y, bbox):
     return yindices[0], yindices[-1] + 1, xindices[0], xindices[-1] + 1
 
 
-def _download_input_files(item, dem_url):
+def _download_input_files(item):
     """
     Download input files from dCache storage to working directory
 
     :param item: PySTAC Item object corresponding to the scene to work on
-    :param dem_url: urlpath to the rasterized digital elevation model
     :return: dictionary including paths to local input files
     """
     s2_df = list_central_wavelength_msi()
@@ -154,7 +153,7 @@ def _download_input_files(item, dem_url):
     }
 
     # load asset hrefs
-    assets = {"DEM": dem_url}
+    assets = {}
     for item_id, asset_keys in assets_per_item.items():
         item_link = item.get_single_link(item_id)
         if item_link is not None:
@@ -439,20 +438,21 @@ def main(config_filename):
         from
     """
 
-    (catalog_url, dem_url, macaroon_path, window_size, shade_removal_angle,
-        bbox, item_id) = _parse_config_file(config_filename)
+    (catalog_urlpath, dem_urlpath, macaroon_path, window_size,
+     shade_removal_angle, bbox, item_id) = _parse_config_file(config_filename)
 
     # configure connection to dCache
     stac2dcache.configure(token_filename=macaroon_path)
 
     # read catalog and extract item
-    catalog = _read_catalog(catalog_url, stac2dcache.stac_io)
+    catalog = _read_catalog(catalog_urlpath, stac2dcache.stac_io)
     item = catalog.get_item(item_id, recursive=True)
 
     assert item is not None, f"Item {item_id} not found!"
 
     # download input files to local
-    assets = _download_input_files(item, dem_url)
+    assets = _download_input_files(item)
+    assets["DEM"] = dem_urlpath  # add path to DEM
 
     # load and preprocess relevant data
     bbox_idx, crs, transform = _get_raster_info(assets["B04"], bbox)
