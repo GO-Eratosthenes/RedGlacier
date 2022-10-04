@@ -365,7 +365,7 @@ def _compute_shadow_classification(
     # classify shadow-enhanced image
     classification = ms.morphological_chan_vese(
         shadow, 30, init_level_set=shadow_art, lambda1=1, lambda2=1,
-        smoothing=0, albedo=albedo, mask=stable
+        smoothing=0, albedo=albedo, mask=~stable
     )
 
     shadow_image_to_list(
