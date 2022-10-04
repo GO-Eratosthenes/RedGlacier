@@ -1,8 +1,10 @@
 import os
 import subprocess
+import time
 
 import stac2dcache
 import pystac
+
 
 # Input section
 MACAROON_PATH = "/home/eratosthenes-fnattino/dCache/macaroon.dat"
@@ -100,6 +102,7 @@ def main():
             inputs["item_id"] = item.id
             _write_slurm_script(script_path, TEMPLATE_SCRIPT, **inputs)
             _submit_slurm_script(script_path, RUN_DIR)
+            time.sleep(5)  # avoid submitting all at once
 
 
 if __name__ == "__main__":
