@@ -425,7 +425,7 @@ def _add_output_to_item(
         rpath = f"{item_dir}/{filename}"
         logger.debug(f"... {rpath}")
         stac2dcache.fs.put_file(lpath, rpath)
-        _item.add_asset(asset_key, pystac.Asset(href=rpath))
+        _item.add_asset(asset_key, pystac.Asset(href=rpath, title=asset_key))
 
     return _item
 
