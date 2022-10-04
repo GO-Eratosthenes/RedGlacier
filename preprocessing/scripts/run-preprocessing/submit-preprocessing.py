@@ -15,6 +15,8 @@ TEMPLATE_SCRIPT = """\
 #SBATCH --cpus-per-task=1
 #SBATCH --partition=normal
 #SBATCH --time=01:00:00
+#SBATCH --job-name={item_id}
+#SBATCH --output=%x.out
 
 cd $TMPDIR
 

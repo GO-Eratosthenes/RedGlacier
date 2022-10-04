@@ -1,4 +1,5 @@
 import configparser
+import logging
 import os
 import sys
 
@@ -24,6 +25,10 @@ from dhdt.processing.matching_tools import get_coordinates_of_template_centers
 from dhdt.generic.mapping_io import make_geo_im
 
 
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
+logger = logging.getLogger(__name__)
+
+
 CONFIG_FILENAME_DEFAULT = "preprocess-item.ini"
 
 BOI = ["red", "green", "blue", "nir"]
@@ -41,10 +46,10 @@ def _parse_config_file(filename=None):
 
     parser = configparser.ConfigParser()
     parser.read(filename)
-    config = parser["generate-shadow-images"]
+    config = parser["preprocess-item"]
 
-    catalog_url = config.pop("catalog_url")
-    dem_url = config.pop("dem_url")
+    catalog_urlpath = config.pop("catalog_urlpath")
+    dem_urlpath = config.pop("dem_urlpath")
     macaroon_path = config.pop("macaroon_path")
     window_size = config.pop("window_size")
     shade_removal_angle = config.pop("shade_removal_angle")
@@ -59,8 +64,8 @@ def _parse_config_file(filename=None):
     assert len(config) == 0, ("Unknown keys: "
                               "{}".format([k for k in config.keys()]))
     return (
-        catalog_url, dem_url, macaroon_path, window_size, shade_removal_angle,
-        bbox, item_id
+        catalog_urlpath, dem_urlpath, macaroon_path, window_size,
+        shade_removal_angle, bbox, item_id
     )
 
 
@@ -127,12 +132,11 @@ def _get_bbox_indices(x, y, bbox):
     return yindices[0], yindices[-1] + 1, xindices[0], xindices[-1] + 1
 
 
-def _download_input_files(item, dem_url):
+def _download_input_files(item):
     """
     Download input files from dCache storage to working directory
 
     :param item: PySTAC Item object corresponding to the scene to work on
-    :param dem_url: urlpath to the rasterized digital elevation model
     :return: dictionary including paths to local input files
     """
     s2_df = list_central_wavelength_msi()
@@ -149,7 +153,7 @@ def _download_input_files(item, dem_url):
     }
 
     # load asset hrefs
-    assets = {"DEM": dem_url}
+    assets = {}
     for item_id, asset_keys in assets_per_item.items():
         item_link = item.get_single_link(item_id)
         if item_link is not None:
@@ -160,7 +164,9 @@ def _download_input_files(item, dem_url):
                 assets[asset_key] = _item.assets[asset_key].get_absolute_href()
 
     # copy files to local
+    logger.info("Downloading input files ...")
     for key, href in assets.items():
+        logger.debug(f"... {href}")
         assets[key] = _copy_file_to_local(
             href, WORK_DIR, filesystem=stac2dcache.fs
         )
@@ -178,7 +184,7 @@ def _get_raster_info(path, bbox):
     """
     raster = _open_raster_file(path, load=False)
     bbox_idx = _get_bbox_indices(raster.x, raster.y, bbox)
-    crs = raster.rio.crs
+    crs = raster.rio.crs.to_wkt()
     transform = raster.rio.transform().to_gdal()
     return bbox_idx, crs, transform
 
@@ -193,6 +199,8 @@ def _load_input_rasters(assets, bbox):
     """
     s2_df = list_central_wavelength_msi()
     s2_df = s2_df[s2_df['common_name'].isin(BOI)]
+
+    logger.info("Loading raster input ...")
 
     # bands
     bands = {
@@ -214,7 +222,7 @@ def _load_input_rasters(assets, bbox):
         cloud_mask = scl == 9
         stable = stable & ~cloud_mask
 
-    return bands, dem, stable
+    return {k: v.data for k, v in bands.items()}, dem.data, stable.data
 
 
 def _load_input_metadata(bbox_idx, transform):
@@ -230,6 +238,8 @@ def _load_input_metadata(bbox_idx, transform):
     # use red band as reference band
     s2_df = list_central_wavelength_msi()
     s2_df = s2_df[s2_df['common_name'] == "red"]
+
+    logger.info("Loading metadata input ...")
 
     # get sun angles
     sun_zn, sun_az = read_sun_angles_s2(WORK_DIR)
@@ -270,15 +280,18 @@ def _compute_shadow_images(
     :param shade_removal_angle: angle for entropy shade removal
     :return: shadow image, albedo image, artificial shadowing and shading
     """
+
+    logger.info("Compute shadow images ...")
+
     # compute shadow-enhanced image
     shadow, albedo = entropy_shade_removal(
-        bands["blue"].data, bands["red"].data, bands["nir"].data,
+        bands["blue"], bands["red"], bands["nir"],
         a=shade_removal_angle,
     )
 
     # construct artificial images
-    shadow_art = make_shadowing(dem.data, sun_az_mean, sun_zn_mean)
-    shade_art = make_shading(dem.data, sun_az, sun_zn)
+    shadow_art = make_shadowing(dem, sun_az_mean, sun_zn_mean)
+    shade_art = make_shading(dem, sun_az, sun_zn)
 
     return shadow, albedo, shadow_art, shade_art
 
@@ -303,26 +316,28 @@ def _coregister(
     :return: co-registered shadow and albedo images
     """
 
-    ii, jj = get_coordinates_of_template_centers(dem.data, window_size)
+    logger.info("Run co-registration ...")
+
+    ii, jj = get_coordinates_of_template_centers(dem, window_size)
     xx, yy = pix2map(transform, ii, jj)
     match_x, match_y, match_score = match_pair(
-        shadow, shade_art, stable.data, stable.data, transform, transform,
+        shade_art, shadow, stable, stable, transform, transform,
         xx, yy, temp_radius=window_size, search_radius=window_size,
         correlator='ampl_comp', subpix='moment', metric='peak_entr'
     )
 
     dy, dx = yy - match_y, xx - match_x
 
-    slope, aspect = get_template_aspect_slope(dem.data, ii, jj, window_size)
+    slope, aspect = get_template_aspect_slope(dem, ii, jj, window_size)
 
     pure = np.logical_and(~np.isnan(dx), slope < 20)
     dx_coreg, dy_coreg = np.median(dx[pure]), np.median(dy[pure])
 
     shadow_ort = compensate_ortho_offset(
-        shadow, dem.data, dx_coreg, dy_coreg, view_az, view_zn, transform
+        shadow, dem, dx_coreg, dy_coreg, view_az, view_zn, transform
     )
     albedo_ort = compensate_ortho_offset(
-        albedo, dem.data, dx_coreg, dy_coreg, view_az, view_zn, transform
+        albedo, dem, dx_coreg, dy_coreg, view_az, view_zn, transform
     )
     return shadow_ort, albedo_ort
 
@@ -344,6 +359,9 @@ def _compute_shadow_classification(
     :param bbox_idx: array indices for cropping
     :return: classification map
     """
+
+    logger.info("Compute shadow classification ...")
+
     # classify shadow-enhanced image
     classification = ms.morphological_chan_vese(
         shadow, 30, init_level_set=shadow_art, lambda1=1, lambda2=1,
@@ -387,9 +405,11 @@ def _add_output_to_item(
         "stable_mask": stable,
         "classification": classification,
     }
+    logger.info("Writing output to local ...")
     for key, val in outputs.items():
         path = f"{WORK_DIR}/{key}.tif"
         no_dat = np.nan if val.dtype.kind == 'f' else -9999
+        logger.debug(f"... {path}")
         make_geo_im(
             val, transform, crs, path, no_dat=no_dat,
             date_created=item.datetime.strftime("%Y:%m:%d %H:%M:%S")
@@ -399,9 +419,11 @@ def _add_output_to_item(
     # upload assets and link them to the item
     _item = item.clone()
     item_dir, _ = os.path.split(_item.get_self_href())
+    logger.info("Uploading output to remote ...")
     for asset_key, lpath in assets.items():
         _, filename = os.path.split(lpath)
         rpath = f"{item_dir}/{filename}"
+        logger.debug(f"... {rpath}")
         stac2dcache.fs.put_file(lpath, rpath)
         _item.add_asset(asset_key, pystac.Asset(href=rpath))
 
@@ -416,23 +438,24 @@ def main(config_filename):
         from
     """
 
-    (catalog_url, dem_url, macaroon_path, window_size, shade_removal_angle,
-        bbox, item_id) = _parse_config_file(config_filename)
+    (catalog_urlpath, dem_urlpath, macaroon_path, window_size,
+     shade_removal_angle, bbox, item_id) = _parse_config_file(config_filename)
 
     # configure connection to dCache
     stac2dcache.configure(token_filename=macaroon_path)
 
     # read catalog and extract item
-    catalog = _read_catalog(catalog_url, stac2dcache.stac_io)
+    catalog = _read_catalog(catalog_urlpath, stac2dcache.stac_io)
     item = catalog.get_item(item_id, recursive=True)
 
     assert item is not None, f"Item {item_id} not found!"
 
     # download input files to local
-    assets = _download_input_files(item, dem_url)
+    assets = _download_input_files(item)
+    assets["DEM"] = dem_urlpath  # add path to DEM
 
     # load and preprocess relevant data
-    bbox_idx, crs, transform = _get_raster_info(assets["B02"], bbox)
+    bbox_idx, crs, transform = _get_raster_info(assets["B04"], bbox)
     bands, dem, stable = _load_input_rasters(assets, bbox)
     sun_zn, sun_az, sun_zn_mean, sun_az_mean, view_zn, view_az = \
         _load_input_metadata(bbox_idx, transform)
@@ -465,3 +488,4 @@ if __name__ == "__main__":
     # optionally retrieve config filename from command line
     config_filename = sys.argv[1] if len(sys.argv) > 1 else None
     main(config_filename)
+    logger.info("Done!")
