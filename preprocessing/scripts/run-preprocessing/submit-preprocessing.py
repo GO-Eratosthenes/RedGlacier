@@ -1,13 +1,15 @@
 import os
 import subprocess
+import time
 
 import stac2dcache
 import pystac
 
+
 # Input section
 MACAROON_PATH = "/home/eratosthenes-fnattino/dCache/macaroon.dat"
 RUN_DIR = "./_run"
-CATALOG_URL = "https://webdav.grid.surfsara.nl:2880/pnfs/grid.sara.nl/data/eratosthenes/disk/red-glacier_shadows"
+CATALOG_URLPATH = "https://webdav.grid.surfsara.nl:2880/pnfs/grid.sara.nl/data/eratosthenes/disk/red-glacier_shadows"
 TEMPLATE_SCRIPT = """\
 #!/bin/bash
 #SBATCH --nodes=1
@@ -24,8 +26,8 @@ input_filename={item_id}.ini
 
 cat <<EOF | tee $input_filename
 [preprocess-item]
-catalog_url = {catalog_url}
-dem_url = https://webdav.grid.surfsara.nl:2880/pnfs/grid.sara.nl/data/eratosthenes/disk/CopernicusDEM_tiles_sentinel-2/COP-DEM-05VMG.tif
+catalog_urlpath = {catalog_urlpath}
+dem_urlpath = /project/eratosthenes/Data/DEM/COP-DEM-05VMG.tif
 macaroon_path = {macaroon_path}
 window_size = 16
 shade_removal_angle = 138
@@ -87,10 +89,10 @@ def main():
     stac2dcache.configure(token_filename=MACAROON_PATH)
 
     # read data catalogs
-    catalog = _read_catalog(CATALOG_URL, stac_io=stac2dcache.stac_io)
+    catalog = _read_catalog(CATALOG_URLPATH, stac_io=stac2dcache.stac_io)
 
     inputs = dict(
-        catalog_url=CATALOG_URL,
+        catalog_urlpath=CATALOG_URLPATH,
         macaroon_path=MACAROON_PATH,
     )
     # loop over all items
@@ -100,6 +102,7 @@ def main():
             inputs["item_id"] = item.id
             _write_slurm_script(script_path, TEMPLATE_SCRIPT, **inputs)
             _submit_slurm_script(script_path, RUN_DIR)
+            time.sleep(5)  # avoid submitting all at once
 
 
 if __name__ == "__main__":
