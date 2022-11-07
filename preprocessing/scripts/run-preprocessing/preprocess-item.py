@@ -180,13 +180,15 @@ def _get_raster_info(path, bbox):
     :param path: path to raster file
     :param bbox: crop the raster using the provided bounding box
     :return: bbox converted to array indices, coordinate reference system and
-        geo-transform
+        geo-transforms of the full scene and its crop
     """
     raster = _open_raster_file(path, load=False)
     bbox_idx = _get_bbox_indices(raster.x, raster.y, bbox)
     crs = raster.rio.crs.to_wkt()
-    transform = raster.rio.transform().to_gdal()
-    return bbox_idx, crs, transform
+    transform_scene = raster.rio.transform().to_gdal()
+    crop = raster.rio.slice_xy(*bbox)
+    transform_crop = crop.rio.transform().to_gdal()
+    return bbox_idx, crs, transform_scene, transform_crop
 
 
 def _load_input_rasters(assets, bbox):
@@ -248,7 +250,11 @@ def _load_input_metadata(bbox_idx, transform):
     sun_zn_mean, sun_az_mean = read_mean_sun_angles_s2(WORK_DIR)
 
     # get sensor configuration
-    det_stack = read_detector_mask(WORK_DIR, s2_df, transform)
+    det_stack = read_detector_mask(
+        WORK_DIR,
+        s2_df,
+        (*transform, *sun_zn.shape),  # include scene size in geo-transform
+    )
 
     # get sensor viewing angles
     view_zn, view_az = read_view_angles_s2(
@@ -455,10 +461,11 @@ def main(config_filename):
     assets["DEM"] = dem_urlpath  # add path to DEM
 
     # load and preprocess relevant data
-    bbox_idx, crs, transform = _get_raster_info(assets["B04"], bbox)
+    bbox_idx, crs, transform_scene, transform_crop = \
+        _get_raster_info(assets["B04"], bbox)
     bands, dem, stable = _load_input_rasters(assets, bbox)
     sun_zn, sun_az, sun_zn_mean, sun_az_mean, view_zn, view_az = \
-        _load_input_metadata(bbox_idx, transform)
+        _load_input_metadata(bbox_idx, transform_scene)
 
     # run preprocessing steps
     shadow, albedo, shadow_art, shade_art = _compute_shadow_images(
@@ -467,17 +474,17 @@ def main(config_filename):
     )
     shadow, albedo = _coregister(
         shadow, albedo, shade_art, dem, stable, view_zn, view_az, window_size,
-        transform
+        transform_crop
     )
     classification = _compute_shadow_classification(
         shadow, albedo, shadow_art, stable, sun_zn_mean, sun_az_mean,
-        transform, bbox_idx
+        transform_crop, bbox_idx
     )
 
     # write out raster output and add these as assets to the catalog item
     item = _add_output_to_item(
         item, shadow, albedo, shadow_art, shade_art, stable, classification,
-        crs, transform
+        crs, transform_crop
     )
 
     # save updated item
