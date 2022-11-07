@@ -160,6 +160,8 @@ def _download_input_files(item):
             _item = pystac.Item.from_file(
                 item_link.get_absolute_href(), stac_io=stac2dcache.stac_io
             )
+            cloud_cover = _item.properties.get("eo:cloud_cover", None)
+            logger.info(f"Item {_item.id} has cloud cover {cloud_cover} ...")
             for asset_key in asset_keys:
                 assets[asset_key] = _item.assets[asset_key].get_absolute_href()
 
